@@ -3,6 +3,12 @@
 
 #include <string>
 
+struct list
+{
+    std::string value;
+    int count;
+};
+
 namespace Afina {
 
 /**
@@ -28,6 +34,10 @@ public:
      * @param key to be associated with value
      * @param value to be assigned for the key
      */
+    //virtual void MoveToEnd(lru_node &node) = 0;
+
+    virtual void ClearMemory(const size_t size1, const size_t size2) = 0;
+
     virtual bool Put(const std::string &key, const std::string &value) = 0;
 
     /**
