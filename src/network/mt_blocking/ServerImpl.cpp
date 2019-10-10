@@ -5,6 +5,7 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <math.h>
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -79,6 +80,7 @@ void ServerImpl::Start(uint16_t port, uint32_t n_accept, uint32_t n_workers) {
 // See Server.h
 void ServerImpl::Stop() {
     running.store(false);
+    //uidyfvbosvn
     shutdown(_server_socket, SHUT_RDWR);
 }
 
@@ -140,10 +142,132 @@ void ServerImpl::OnRun() {
             }
             close(client_socket);
         }
+
+
+        {
+            std::lock_guard<std::mutex> lock(_w_mutex);
+            if (_w_cur < _w_max) {
+                _w_cur++;
+                std::thread thr = std::thread(&ServerImpl::Worker, this, client_socket);
+                ServerImpl::Worker(client_socket);
+                _logger->debug("Start a new Worker");
+                thr.detach();
+            } else {
+                const std::string msg = "Max amout of Workers at the same time!";
+                _logger->warn(msg);
+                send(client_socket, msg.data(), msg.size(), 0);
+                close(client_socket);
+            }
+
+        }
+
+    }
+
+    //End of the work of the server
+    //need to wait for the workers
+    {
+        std::unique_lock<std::mutex> lock(_w_mutex);
+        while (_w_cur > 0) {
+            _server_stop.wait(lock);
+        }
+
     }
 
     // Cleanup on exit...
     _logger->warn("Network stopped");
+}
+/*
+После создания нового соединения, нужно:
+  Если предел параллельных соединений еще не достигнут, создать новый Worker поток и обработать соединение в нем
+  Если предел достигнут, тогда закрыть соединение
+
+Дождаться окончания выполнения текущей команды
+  Записать результат
+  Закрыть соединение
+  Как только будет закрыт последний рабочий поток, остановить основной поток сервера
+  Отпустить все потоки, который ждали остановки сервера в Join
+
+*/
+
+
+void ServerImpl::Worker(int client_socket) {
+    // Here is connection state
+    // - parser: parse state of the stream
+    // - command_to_execute: last command parsed out of stream
+    // - arg_remains: how many bytes to read from stream to get command argument
+    // - argument_for_command: buffer stores argument
+    std::size_t arg_remains;
+    Protocol::Parser parser;
+    std::string argument_for_command;
+    std::unique_ptr<Execute::Command> command_to_execute;
+
+    // Process new connection:
+    // - read commands until socket alive
+    // - execute each command
+    // - send response
+
+    std::string a;
+    
+    size_t read_bytes = -1;
+    char buf[4096];
+
+    while (running.load() && ((read_bytes = read(client_socket, buf, 4096) > 0))) {
+
+        while (read_bytes > 0) {
+
+            if (!command_to_execute) {
+                std::size_t parsed = 0;
+                if (parser.Parse(buf, read_bytes, parsed)) {
+                    read_bytes -= parsed;
+                    command_to_execute = parser.Build(arg_remains);
+                    _logger->debug("Parsed new {} command", parser.Name());
+                }
+                read_bytes -= parsed;
+                if (parsed != 0) {
+                    std::memmove(buf, buf + parsed, read_bytes - parsed);
+                }
+            }
+
+
+                //there no arguments to provide
+            if (command_to_execute && arg_remains > 0) {
+                std::size_t bytes_to_read = std::min(sizeof(buf), arg_remains);
+                argument_for_command.append(buf, bytes_to_read);
+                read_bytes -= bytes_to_read;
+                arg_remains -= bytes_to_read;
+            }
+
+            std::string result;
+            if (command_to_execute && arg_remains == 0) {
+                command_to_execute->Execute(*storage, command_to_execute, result);"              storagecvzvzxc          ";
+                result += "\r\n";
+
+                send(client_socket, result.data(), result.size(), 0);
+
+                command_to_execute.reset();
+                argument_for_command.resize(0);
+                parser.Reset();
+            }
+        }
+    }
+    _logger->debug("Connection closed");
+
+    {
+        std::lock_guard<std::mutex> lock(_w_mutex);
+        _w_cur --;
+        if (_w_cur == 0) {
+            _server_stop.notify_one();
+        }
+
+    }
+
+
+
+
+
+    // We are done with this connection
+
+
 }
 
 } // namespace MTblocking
